@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div align="center">
   <img src="public/icon.png" height=75 width=75 />
   <h1>Mocha</h1>
@@ -35,3 +36,6 @@ npm run start
 
 ## Support us
 If you like Mocha and would like to support the development, you can donate to me [here](https://buymeacoffee.com/proudparrot2). It helps with server costs, domains, and otherwise financially supports me.
+=======
+# proxyTest
+>>>>>>> 67cdf3327c7b4d45f1ded52b99a4dbb91ed59d67
