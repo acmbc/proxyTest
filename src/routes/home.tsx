@@ -38,18 +38,7 @@ export default function Home() {
         </div>
       </div>
 
-      <div class="absolute bottom-0 flex w-screen items-center justify-between p-4 px-6 text-sm">
-        <div class="flex gap-4">
-          <div class="flex items-center gap-2">
-            <GitCommitHorizontal />
-            <A class="link-hover link" target="_blank" href={`https://github.com/cafe-labs/mocha/commit/${__GIT_COMMIT__}/`}>
-              {__GIT_COMMIT__.slice(0, 7)}
-            </A>
-          </div>
-          <Dot class="-mx-3" />
-        
-        </div>
-      </div>
+      
 
       
     </div>
