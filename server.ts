@@ -8,41 +8,43 @@ import { build } from 'vite'
 import cookieParser from 'cookie-parser'
 import type { Socket } from 'node:net'
 
-const httpServer = http.createServer()
-const proxy = httpProxy.createProxyServer()
+// --- CONFIG ---
+const PORTS = [3003, 3004] //  add as many ports as you want
 
+// --- INIT ---
+const proxy = httpProxy.createProxyServer()
 const app = express()
-const port = process.env.PORT || 3003
 
 consola.start('Building frontend')
 await build()
 
-// --- COOKIE PARSER ---
+// --- MIDDLEWARE ---
 app.use(cookieParser())
 
 // --- USERS ---
 const users: Record<string, { password: string, cookie?: string }> = {
-  'alice': { password: 'password123' },
-  'bob': { password: 'hunter2' },
-  'carol': { password: 'letmein' },
+  alice: { password: 'password123' },
+  bob: { password: 'hunter2' },
+  carol: { password: 'letmein' },
 }
 
-// --- AUTH MIDDLEWARE ---
+// --- AUTH ---
 app.use((req, res, next) => {
-  // Allow logout/reset routes without auth
   if (req.path.startsWith('/logout') || req.path.startsWith('/reset')) {
     return next()
   }
 
   const auth = req.headers.authorization
 
-  // Check cookie first
-  const cookieToken = req.cookies['authToken']
-  const validUser = Object.values(users).find(u => u.cookie === cookieToken)
-  if (cookieToken && validUser) {
+  //  Cookie auth
+  const token = req.cookies['authToken']
+  const userEntry = Object.entries(users).find(([, u]) => u.cookie === token)
+
+  if (token && userEntry) {
     return next()
   }
 
+  //  Basic auth fallback
   if (!auth) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"')
     return res.status(401).send('Authentication required.')
@@ -52,28 +54,33 @@ app.use((req, res, next) => {
   if (scheme !== 'Basic') return res.status(400).send('Bad request')
 
   const decoded = Buffer.from(encoded, 'base64').toString('utf8')
-  const [user, pass] = decoded.split(':')
+  const [username, password] = decoded.split(':')
 
-  const userData = users[user]
-  if (!userData || userData.password !== pass) {
+  const user = users[username]
+
+  if (!user || user.password !== password) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"')
     return res.status(401).send('Authentication required.')
   }
 
-  // Already in use
-  if (userData.cookie) {
+  //  Prevent multi-device login
+  if (user.cookie) {
     return res.status(403).send('This password is already in use by another device.')
   }
 
-  // Assign cookie
-  const token = Math.random().toString(36).substring(2)
-  userData.cookie = token
+  //  Assign cookie
+  const newToken = Math.random().toString(36).slice(2)
+  user.cookie = newToken
 
-  res.cookie('authToken', token, { httpOnly: true })
+  res.cookie('authToken', newToken, {
+    httpOnly: true,
+    sameSite: 'lax',
+  })
+
   next()
 })
 
-// --- LOGOUT ROUTE (current device) ---
+// --- LOGOUT ---
 app.get('/logout', (req, res) => {
   const token = req.cookies['authToken']
 
@@ -87,31 +94,28 @@ app.get('/logout', (req, res) => {
   res.send('Logged out. Password is now free.')
 })
 
-// --- RESET ROUTE (manual override) ---
-// Example: /reset/alice
+// --- RESET ---
 app.get('/reset/:user', (req, res) => {
-  const user = req.params.user
+  const user = users[req.params.user]
 
-  if (users[user]) {
-    users[user].cookie = undefined
-    return res.send(`Reset ${user}. Password is now free.`)
+  if (user) {
+    user.cookie = undefined
+    return res.send(`Reset ${req.params.user}. Password is now free.`)
   }
 
   res.status(404).send('User not found.')
 })
 
-// --- STATIC FILES ---
+// --- STATIC ---
 app.use(express.static('dist'))
 
 // --- CDN PROXY ---
 app.use('/cdn', (req, res) => {
+  req.url = req.url.replace(/^\/cdn/, '') //  fix path rewrite
+
   proxy.web(req, res, {
     target: 'https://assets.3kh0.net',
     changeOrigin: true,
-    // @ts-ignore
-    rewritePath: {
-      '^/cdn': ''
-    }
   })
 })
 
@@ -120,23 +124,22 @@ app.get('*', (_req, res) => {
   res.sendFile(path.resolve('dist', 'index.html'))
 })
 
-// --- SERVER ---
-httpServer.on('request', (req, res) => {
-  app(req, res)
-})
+// --- SERVER FACTORY ---
+function startServer(port: number) {
+  const server = http.createServer(app)
 
-httpServer.on('upgrade', (req, socket, head) => {
-  if (req.url?.startsWith('/wisp/')) {
-    wisp.routeRequest(req, socket as Socket, head)
-  } else {
-    socket.end()
-  }
-})
+  server.on('upgrade', (req, socket, head) => {
+    if (req.url?.startsWith('/wisp/')) {
+      wisp.routeRequest(req, socket as Socket, head)
+    } else {
+      socket.end()
+    }
+  })
 
-httpServer.on('listening', () => {
-  consola.info(`Listening on http://localhost:${port}`)
-})
+  server.listen(port, () => {
+    consola.success(`Server running at http://localhost:${port}`)
+  })
+}
 
-httpServer.listen({
-  port
-})
+// --- START ALL PORTS ---
+PORTS.forEach(startServer)
