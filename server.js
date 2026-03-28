@@ -1,111 +1,107 @@
-// server.ts - fully ready for bundling and one-click start
-// --- IMPORTS ---
-// @ts-ignore
-import express from 'express';
-// @ts-ignore
-import cookieParser from 'cookie-parser';
-// @ts-ignore
-import httpProxy from 'http-proxy';
-// @ts-ignore
-import wisp from 'wisp-server-node';
-// @ts-ignore
-import { consola } from 'consola';
+// server.ts - Node-only, no npm needed
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
-// --- CONFIG ---
+import { URL } from 'node:url';
 const PORT = process.env.PORT || 3003;
-// --- EXPRESS APP ---
-const app = express();
-const httpServer = http.createServer(app);
-const proxy = httpProxy.createProxyServer();
-// --- LOGGING ---
-consola.start('Server starting...');
-// --- COOKIE PARSER ---
-app.use(cookieParser());
+const DIST = path.resolve('dist');
 // --- USERS (in-memory auth) ---
 const users = {
     'alice': { password: 'password123' },
     'bob': { password: 'hunter2' },
     'carol': { password: 'letmein' },
 };
-// --- AUTH MIDDLEWARE ---
-app.use((req, res, next) => {
-    // Allow logout/reset routes without auth
-    if (req.path.startsWith('/logout') || req.path.startsWith('/reset'))
-        return next();
-    const auth = req.headers.authorization;
-    // Check cookie first
-    const cookieToken = req.cookies['authToken'];
-    const validUser = Object.values(users).find(u => u.cookie === cookieToken);
+// --- COOKIE UTIL ---
+function parseCookies(cookieHeader) {
+    const cookies = {};
+    if (!cookieHeader)
+        return cookies;
+    cookieHeader.split(';').forEach(c => {
+        const [key, ...v] = c.split('=');
+        cookies[key.trim()] = decodeURIComponent(v.join('='));
+    });
+    return cookies;
+}
+function serializeCookie(name, value) {
+    return `${name}=${encodeURIComponent(value)}; HttpOnly`;
+}
+// --- AUTH CHECK ---
+function checkAuth(req) {
+    const cookies = parseCookies(req.headers.cookie);
+    const cookieToken = cookies['authToken'];
+    const validUser = Object.entries(users).find(([_, u]) => u.cookie === cookieToken);
     if (cookieToken && validUser)
-        return next();
-    if (!auth) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"');
-        return res.status(401).send('Authentication required.');
-    }
-    const [scheme, encoded] = auth.split(' ');
-    if (scheme !== 'Basic')
-        return res.status(400).send('Bad request');
+        return { valid: true, user: validUser[0] };
+    const authHeader = req.headers.authorization;
+    if (!authHeader)
+        return { valid: false };
+    const [scheme, encoded] = authHeader.split(' ');
+    if (scheme !== 'Basic' || !encoded)
+        return { valid: false };
     const decoded = Buffer.from(encoded, 'base64').toString('utf8');
     const [user, pass] = decoded.split(':');
     const userData = users[user];
-    if (!userData || userData.password !== pass) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"');
-        return res.status(401).send('Authentication required.');
-    }
-    if (userData.cookie) {
-        return res.status(403).send('This password is already in use by another device.');
-    }
-    // Assign cookie
+    if (!userData || userData.password !== pass)
+        return { valid: false };
+    if (userData.cookie)
+        return { valid: false }; // already in use
+    // assign cookie
     const token = Math.random().toString(36).substring(2);
     userData.cookie = token;
-    res.cookie('authToken', token, { httpOnly: true });
-    next();
-});
-// --- LOGOUT ROUTE ---
-app.get('/logout', (req, res) => {
-    const token = req.cookies['authToken'];
-    for (const user of Object.values(users)) {
-        if (user.cookie === token)
-            user.cookie = undefined;
+    return { valid: true, user };
+}
+// --- SERVER ---
+const server = http.createServer((req, res) => {
+    const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    // Logout route
+    if (reqUrl.pathname.startsWith('/logout')) {
+        const cookies = parseCookies(req.headers.cookie);
+        const token = cookies['authToken'];
+        Object.values(users).forEach(u => {
+            if (u.cookie === token)
+                u.cookie = undefined;
+        });
+        res.setHeader('Set-Cookie', 'authToken=; HttpOnly; Max-Age=0');
+        res.end('Logged out. Password is now free.');
+        return;
     }
-    res.clearCookie('authToken');
-    res.send('Logged out. Password is now free.');
-});
-// --- RESET ROUTE ---
-app.get('/reset/:user', (req, res) => {
-    const user = req.params.user;
-    if (users[user]) {
-        users[user].cookie = undefined;
-        return res.send(`Reset ${user}. Password is now free.`);
+    // Reset route
+    if (reqUrl.pathname.startsWith('/reset/')) {
+        const user = reqUrl.pathname.replace('/reset/', '');
+        if (users[user]) {
+            users[user].cookie = undefined;
+            res.end(`Reset ${user}. Password is now free.`);
+        }
+        else {
+            res.statusCode = 404;
+            res.end('User not found.');
+        }
+        return;
     }
-    res.status(404).send('User not found.');
-});
-// --- STATIC FILES ---
-app.use(express.static(path.resolve('dist')));
-// --- CDN PROXY ---
-app.use('/cdn', (req, res) => {
-    proxy.web(req, res, {
-        target: 'https://assets.3kh0.net',
-        changeOrigin: true,
-        // @ts-ignore
-        rewritePath: { '^/cdn': '' }
+    // Auth middleware
+    const auth = checkAuth(req);
+    if (!auth.valid) {
+        res.statusCode = 401;
+        res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"');
+        res.end('Authentication required.');
+        return;
+    }
+    // Serve static files
+    const pathname = reqUrl.pathname ?? '/';
+    let filePath = path.join(DIST, pathname === '/' ? 'index.html' : pathname);
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+        filePath = path.join(DIST, 'index.html'); // fallback
+    }
+    fs.readFile(filePath, (err, data) => {
+        if (err) {
+            res.statusCode = 500;
+            res.end('Server error');
+            return;
+        }
+        res.end(data);
     });
 });
-// --- SPA FALLBACK ---
-app.get('*', (_req, res) => {
-    res.sendFile(path.resolve('dist', 'index.html'));
-});
-// --- WEBSOCKETS (WISP) ---
-httpServer.on('upgrade', (req, socket, head) => {
-    if (req.url?.startsWith('/wisp/')) {
-        wisp.routeRequest(req, socket, head);
-    }
-    else {
-        socket.end();
-    }
-});
-// --- START SERVER ---
-httpServer.listen(PORT, () => {
-    consola.success(`Server listening on http://localhost:${PORT}`);
+// --- START ---
+server.listen(PORT, () => {
+    console.log(`Server listening on http://localhost:${PORT}`);
 });
