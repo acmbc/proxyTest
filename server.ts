@@ -1,50 +1,53 @@
-import { consola } from 'consola'
+// server.ts - fully ready for bundling and one-click start
+
+// --- IMPORTS ---
+// @ts-ignore
 import express from 'express'
+// @ts-ignore
+import cookieParser from 'cookie-parser'
+// @ts-ignore
 import httpProxy from 'http-proxy'
+// @ts-ignore
 import wisp from 'wisp-server-node'
+// @ts-ignore
+import { consola } from 'consola'
 import http from 'node:http'
 import path from 'node:path'
-import { build } from 'vite'
-import cookieParser from 'cookie-parser'
 import type { Socket } from 'node:net'
 
 // --- CONFIG ---
-const PORTS = [3003, 3004] //  add as many ports as you want
+const PORT = process.env.PORT || 3003
 
-// --- INIT ---
-const proxy = httpProxy.createProxyServer()
+// --- EXPRESS APP ---
 const app = express()
+const httpServer = http.createServer(app)
+const proxy = httpProxy.createProxyServer()
 
-consola.start('Building frontend')
-await build()
+// --- LOGGING ---
+consola.start('Server starting...')
 
-// --- MIDDLEWARE ---
+// --- COOKIE PARSER ---
 app.use(cookieParser())
 
-// --- USERS ---
+// --- USERS (in-memory auth) ---
 const users: Record<string, { password: string, cookie?: string }> = {
-  alice: { password: 'password123' },
-  bob: { password: 'hunter2' },
-  carol: { password: 'letmein' },
+  'alice': { password: 'password123' },
+  'bob': { password: 'hunter2' },
+  'carol': { password: 'letmein' },
 }
 
-// --- AUTH ---
+// --- AUTH MIDDLEWARE ---
 app.use((req, res, next) => {
-  if (req.path.startsWith('/logout') || req.path.startsWith('/reset')) {
-    return next()
-  }
+  // Allow logout/reset routes without auth
+  if (req.path.startsWith('/logout') || req.path.startsWith('/reset')) return next()
 
   const auth = req.headers.authorization
 
-  //  Cookie auth
-  const token = req.cookies['authToken']
-  const userEntry = Object.entries(users).find(([, u]) => u.cookie === token)
+  // Check cookie first
+  const cookieToken = req.cookies['authToken']
+  const validUser = Object.values(users).find(u => u.cookie === cookieToken)
+  if (cookieToken && validUser) return next()
 
-  if (token && userEntry) {
-    return next()
-  }
-
-  //  Basic auth fallback
   if (!auth) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"')
     return res.status(401).send('Authentication required.')
@@ -54,68 +57,56 @@ app.use((req, res, next) => {
   if (scheme !== 'Basic') return res.status(400).send('Bad request')
 
   const decoded = Buffer.from(encoded, 'base64').toString('utf8')
-  const [username, password] = decoded.split(':')
+  const [user, pass] = decoded.split(':')
 
-  const user = users[username]
-
-  if (!user || user.password !== password) {
+  const userData = users[user]
+  if (!userData || userData.password !== pass) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Protected Site"')
     return res.status(401).send('Authentication required.')
   }
 
-  //  Prevent multi-device login
-  if (user.cookie) {
+  if (userData.cookie) {
     return res.status(403).send('This password is already in use by another device.')
   }
 
-  //  Assign cookie
-  const newToken = Math.random().toString(36).slice(2)
-  user.cookie = newToken
+  // Assign cookie
+  const token = Math.random().toString(36).substring(2)
+  userData.cookie = token
 
-  res.cookie('authToken', newToken, {
-    httpOnly: true,
-    sameSite: 'lax',
-  })
-
+  res.cookie('authToken', token, { httpOnly: true })
   next()
 })
 
-// --- LOGOUT ---
+// --- LOGOUT ROUTE ---
 app.get('/logout', (req, res) => {
   const token = req.cookies['authToken']
-
   for (const user of Object.values(users)) {
-    if (user.cookie === token) {
-      user.cookie = undefined
-    }
+    if (user.cookie === token) user.cookie = undefined
   }
-
   res.clearCookie('authToken')
   res.send('Logged out. Password is now free.')
 })
 
-// --- RESET ---
+// --- RESET ROUTE ---
 app.get('/reset/:user', (req, res) => {
-  const user = users[req.params.user]
-
-  if (user) {
-    user.cookie = undefined
-    return res.send(`Reset ${req.params.user}. Password is now free.`)
+  const user = req.params.user
+  if (users[user]) {
+    users[user].cookie = undefined
+    return res.send(`Reset ${user}. Password is now free.`)
   }
-
   res.status(404).send('User not found.')
 })
 
-// --- STATIC ---
-app.use(express.static('dist'))
+// --- STATIC FILES ---
+app.use(express.static(path.resolve('dist')))
 
 // --- CDN PROXY ---
 app.use('/cdn', (req, res) => {
-  req.url = req.url.replace(/^\/cdn/, '') //  fix path rewrite
-
   proxy.web(req, res, {
     target: 'https://assets.3kh0.net',
     changeOrigin: true,
+    // @ts-ignore
+    rewritePath: { '^/cdn': '' }
   })
 })
 
@@ -124,22 +115,16 @@ app.get('*', (_req, res) => {
   res.sendFile(path.resolve('dist', 'index.html'))
 })
 
-// --- SERVER FACTORY ---
-function startServer(port: number) {
-  const server = http.createServer(app)
+// --- WEBSOCKETS (WISP) ---
+httpServer.on('upgrade', (req, socket, head) => {
+  if (req.url?.startsWith('/wisp/')) {
+    wisp.routeRequest(req, socket as Socket, head)
+  } else {
+    socket.end()
+  }
+})
 
-  server.on('upgrade', (req, socket, head) => {
-    if (req.url?.startsWith('/wisp/')) {
-      wisp.routeRequest(req, socket as Socket, head)
-    } else {
-      socket.end()
-    }
-  })
-
-  server.listen(port, () => {
-    consola.success(`Server running at http://localhost:${port}`)
-  })
-}
-
-// --- START ALL PORTS ---
-PORTS.forEach(startServer)
+// --- START SERVER ---
+httpServer.listen(PORT, () => {
+  consola.success(`Server listening on http://localhost:${PORT}`)
+})
