@@ -1,7 +1,9 @@
 @echo off
 title Proxy Server Launcher
-echo Checking for Bun...
+setlocal
+cd /d "%~dp0"
 
+echo Checking for Bun...
 where bun >nul 2>nul
 if %errorlevel% neq 0 (
     echo [ERROR] Bun is not installed. 
@@ -15,6 +17,12 @@ if not exist "node_modules" (
     call bun install consola express http-proxy wisp-server-node vite
 )
 
+if not exist "server.ts" (
+    echo [ERROR] server.ts was not found in %cd%
+    pause
+    exit /b
+)
+
 echo Starting server...
-call bun server.ts
+bun server.ts
 pause
