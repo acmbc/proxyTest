@@ -99,7 +99,7 @@ app.use((req, res, next) => {
 // --- PROTECTED ROUTES ---
 
 // Proxy /cdn -> assets.3kh0.net
-app.all('/cdn*', (req, res) => {
+app.all(/\/cdn.*/, (req, res) => {
   req.url = req.url.replace(/^\/cdn/, '') // Manual rewrite
   proxy.web(req, res, {
     target: 'https://assets.3kh0.net',
@@ -114,7 +114,7 @@ app.all('/cdn*', (req, res) => {
 app.use(express.static(DIST))
 
 // SPA Fallback
-app.get('*', (_req, res) => {
+app.get(/^(?!\/wisp\/).*/, (_req, res) => {
   res.sendFile(path.join(DIST, 'index.html'))
 })
 
